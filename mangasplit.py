@@ -5,6 +5,7 @@ import mimetypes
 import shutil
 import subprocess
 import textwrap
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import total_ordering
@@ -31,7 +32,7 @@ class ImageMagickSplitItem:
 
 class ImageMagick:
     @staticmethod
-    def get_aspect_ratio(path: Path) -> Dimension:
+    def get_dimension(path: Path) -> Dimension:
         result = subprocess.check_output(
             ["identify", "-format", "%w %h", str(path)], text=True, encoding="utf-8"
         )
@@ -39,9 +40,21 @@ class ImageMagick:
         return Dimension(width, height)
 
     @staticmethod
+    def trim(image: Path, cwd: str) -> Path:
+        output_dir = Path(cwd).joinpath(f"cover_{int(time.time())}")
+        output_dir.mkdir()
+        output_file = output_dir.joinpath("000.jpg")
+        subprocess.check_call(
+            ["magick", image, "-trim", "+repage", output_file], cwd=output_dir
+        )
+        return output_file
+
+    @staticmethod
     def split_images(
         paths: list[Path], cwd: str, is_ltr: bool
     ) -> Iterable[ImageMagickSplitItem]:
+        output_dir = Path(cwd).joinpath(f"splits_{int(time.time())}")
+        output_dir.mkdir()
         subprocess.check_call(
             [
                 "magick",
@@ -53,9 +66,10 @@ class ImageMagick:
                 "+repage",
                 "%09d.jpg",
             ],
-            cwd=cwd,
+            cwd=output_dir,
         )
-        results = iter(ImageFinder.list_image_files(Path(cwd)))
+
+        results = iter(ImageFinder.list_image_files(output_dir))
         for path in paths:
             left, right = next(results), next(results)
             item = ImageMagickSplitItem(
@@ -66,25 +80,43 @@ class ImageMagick:
 
 
 @dataclass
+class ImageFinderResultCover:
+    path: Path
+    dimension: Dimension
+
+
+@dataclass
 class ImageFinderResult:
     single_pages: list[Path]
     double_pages: list[Path]
+    cover: Optional[ImageFinderResultCover] = field(default=None)
 
 
 class ImageFinder:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, has_cover: bool):
         self.directory = directory
+        self.has_cover = has_cover
 
     def find(self) -> ImageFinderResult:
+        cover = None
         double_pages = []
         single_pages = []
-        for file in self.list_image_files(self.directory):
-            dimension = ImageMagick.get_aspect_ratio(file)
-            if dimension.is_double_page():
-                double_pages.append(file)
-            else:
-                single_pages.append(file)
-        return ImageFinderResult(single_pages=single_pages, double_pages=double_pages)
+        files = self.list_image_files(self.directory)
+        if len(files) != 0:
+            if self.has_cover:
+                cover_file = files.pop(0)
+                cover = ImageFinderResultCover(
+                    path=cover_file, dimension=ImageMagick.get_dimension(cover_file)
+                )
+            for file in files:
+                dimension = ImageMagick.get_dimension(file)
+                if dimension.is_double_page():
+                    double_pages.append(file)
+                else:
+                    single_pages.append(file)
+        return ImageFinderResult(
+            single_pages=single_pages, double_pages=double_pages, cover=cover
+        )
 
     @staticmethod
     def list_image_files(directory: Path) -> list[Path]:
@@ -124,8 +156,15 @@ class ProcessedImagePath:
 
 
 class Splitter:
-    def __init__(self, input_dir: Path, tmpdir: str, is_ltr: bool, keep_double: bool):
-        self.finder = ImageFinder(input_dir)
+    def __init__(
+        self,
+        input_dir: Path,
+        tmpdir: str,
+        is_ltr: bool,
+        keep_double: bool,
+        has_cover: bool,
+    ):
+        self.finder = ImageFinder(directory=input_dir, has_cover=has_cover)
         self.tmpdir = tmpdir
         self.is_ltr = is_ltr
         self.keep_double = keep_double
@@ -138,6 +177,9 @@ class Splitter:
         ]
         if self.keep_double:
             pages.append(self._process_single_pages(images.double_pages))
+        if images.cover is not None:
+            processed_cover = self._process_cover(images.cover)
+            pages.append((processed_cover,))
 
         return sorted(chain.from_iterable(pages))
 
@@ -145,6 +187,9 @@ class Splitter:
     def _process_single_pages(
         images: list[Path],
     ) -> Iterable[ProcessedImagePath]:
+        if len(images) == 0:
+            return
+
         for image in images:
             yield ProcessedImagePath(original_path=image, processed_path=image)
 
@@ -152,6 +197,9 @@ class Splitter:
         self,
         images: list[Path],
     ) -> Iterable[ProcessedImagePath]:
+        if len(images) == 0:
+            return
+
         splits = ImageMagick.split_images(images, cwd=self.tmpdir, is_ltr=self.is_ltr)
         for split in splits:
             for part, processed_path in enumerate(split.split_path, start=1):
@@ -160,6 +208,12 @@ class Splitter:
                     processed_path=processed_path,
                     part=part,
                 )
+
+    def _process_cover(self, cover: ImageFinderResultCover) -> ProcessedImagePath:
+        if cover.dimension.is_double_page():
+            trimmed = ImageMagick.trim(cover.path, self.tmpdir)
+            return ProcessedImagePath(original_path=cover.path, processed_path=trimmed)
+        return ProcessedImagePath(original_path=cover.path, processed_path=cover.path)
 
 
 class Saver:
@@ -206,7 +260,8 @@ def parse_args():
           {prog} # process current directory
           {prog} -i input_dir/ -o output_dir/
           {prog} -i input_dir/ -o output_dir/ -k # keep double pages
-          {prog} -i input_dir/ -o output_dir/ --ltr # left to right mode
+          {prog} -i input_dir/ -o output_dir/ -l # left to right mode
+          {prog} -i input_dir/ -o output_dir/ -n # treat first page as normal content
           {prog} -i input_dir/ -o output_dir/ -f # overwrites existing files
             """
         ),
@@ -240,6 +295,13 @@ def parse_args():
         help="Keep double pages",
     )
     parser.add_argument(
+        "-n",
+        "--no-cover",
+        action="store_true",
+        default=False,
+        help="Treat first page as content",
+    )
+    parser.add_argument(
         "-f",
         "--force",
         action="store_true",
@@ -260,6 +322,7 @@ def main():
             tmpdir=tmpdir,
             is_ltr=args.ltr,
             keep_double=args.keep_double,
+            has_cover=not args.no_cover,
         )
         images = splitter.split()
         saver = Saver(output_dir=args.output_dir, overwrite=args.force)

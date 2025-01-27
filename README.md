@@ -18,7 +18,7 @@ Or clone the repo and run `make install`
 ## Usage
 
 ```shell
-usage: mangasplit [-h] [-i INPUT_DIR] [-o OUTPUT_DIR] [-l] [-k] [-f]
+usage: mangasplit [-h] [-i INPUT_DIR] [-o OUTPUT_DIR] [-l] [-k] [-n] [-f]
 
 split manga images vertically
 
@@ -31,12 +31,14 @@ options:
                         Output directory
   -l, --ltr             Input images are left to right
   -k, --keep_double     Keep double pages
+  -n, --no-cover        Treat first page as content
   -f, --force           Force overwrite existing files
 
 examples:
   mangasplit # process current directory
   mangasplit -i input_dir/ -o output_dir/
   mangasplit -i input_dir/ -o output_dir/ -k # keep double pages
-  mangasplit -i input_dir/ -o output_dir/ --ltr # left to right mode
+  mangasplit -i input_dir/ -o output_dir/ -l # left to right mode
+  mangasplit -i input_dir/ -o output_dir/ -n # treat first page as normal content
   mangasplit -i input_dir/ -o output_dir/ -f # overwrites existing files
 ```
