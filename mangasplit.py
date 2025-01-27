@@ -8,7 +8,6 @@ import textwrap
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from functools import total_ordering
 from itertools import chain
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -124,7 +123,7 @@ class ImageFinder:
         for path in directory.iterdir():
             if path.is_file() and ImageFinder._is_image_file(path):
                 paths.append(path)
-        return sorted(paths, key=lambda x: x.stem)
+        return Sorter.sort_paths(paths)
 
     @staticmethod
     def _is_image_file(file: Path) -> bool:
@@ -132,27 +131,39 @@ class ImageFinder:
         return file_type and file_type.startswith("image")
 
 
-@total_ordering
 @dataclass
 class ProcessedImagePath:
     original_path: Path
     processed_path: Path
     part: Optional[int] = field(default=None)
 
-    def __eq__(self, other):
-        if not isinstance(other, ProcessedImagePath):
-            return NotImplemented
-        return (self.original_path.stem, self.part) == (
-            other.original_path.stem,
-            other.part,
+
+class Sorter:
+    @staticmethod
+    def sort_paths(paths: Iterable[Path]) -> list[Path]:
+        return sorted(
+            paths, key=lambda path: Sorter._sort_key_prioritizing_non_alnum(path.stem)
         )
 
-    def __lt__(self, other):
-        if not isinstance(other, ProcessedImagePath):
-            return NotImplemented
-        if self.original_path.stem != other.original_path.stem:
-            return self.original_path.stem < other.original_path.stem
-        return (self.part or 0) < (other.part or 0)
+    @staticmethod
+    def sort_processed_image_paths(
+        paths: Iterable[ProcessedImagePath],
+    ) -> list[ProcessedImagePath]:
+        return sorted(
+            paths,
+            key=lambda path: Sorter._sort_key_including_processed_image_part(path),
+        )
+
+    @staticmethod
+    def _sort_key_prioritizing_non_alnum(s: str) -> tuple:
+        return s[0].isalnum(), s
+
+    @staticmethod
+    def _sort_key_including_processed_image_part(path: ProcessedImagePath) -> tuple:
+        return (
+            *Sorter._sort_key_prioritizing_non_alnum(path.original_path.stem),
+            path.part or 0,
+        )
 
 
 class Splitter:
@@ -181,7 +192,7 @@ class Splitter:
             processed_cover = self._process_cover(images.cover)
             pages.append((processed_cover,))
 
-        return sorted(chain.from_iterable(pages))
+        return Sorter.sort_processed_image_paths(chain.from_iterable(pages))
 
     @staticmethod
     def _process_single_pages(
